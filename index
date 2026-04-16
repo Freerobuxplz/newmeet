@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NewMeets | Cloud Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+
+    <style>
+        [x-cloak] { display: none !important; }
+        body { background: #050508; color: white; font-family: 'Inter', sans-serif; height: 100vh; overflow: hidden; }
+        .ui-panel { background: #11111b; border: 3px solid #1e1e2e; border-radius: 1.5rem; }
+        .speaking-border { border: 4px solid #22c55e !important; box-shadow: 0 0 25px #22c55e; transform: scale(1.05); }
+        .mic-meter { height: 4px; background: #22c55e; transition: width 0.05s; }
+    </style>
+</head>
+<body x-data="newMeets()" x-init="boot()">
+
+    <div x-show="view === 'login'" class="flex items-center justify-center h-screen bg-slate-950">
+        <div class="ui-panel p-10 w-full max-w-sm text-center">
+            <h1 class="text-6xl font-black text-blue-500 italic mb-8">NM</h1>
+            <input type="text" placeholder="NAME" x-model="user.name" class="w-full bg-black border-2 border-slate-800 p-4 rounded-xl text-center font-bold text-white mb-6 focus:border-blue-500 outline-none">
+            <button @click="saveProfile()" class="w-full bg-blue-600 py-4 rounded-xl font-black text-lg hover:bg-blue-500">START</button>
+        </div>
+    </div>
+
+    <div x-show="view === 'menu'" x-cloak class="h-screen flex flex-col p-8">
+        <div class="flex justify-between items-center mb-8">
+            <div class="flex items-center gap-4">
+                <img :src="user.pfp" class="w-12 h-12 rounded-full border-2 border-blue-500">
+                <span class="font-black text-xl" x-text="user.name"></span>
+            </div>
+            <button @click="createRoom()" class="bg-green-600 px-8 py-3 rounded-xl font-black">+ CREATE WORLD</button>
+        </div>
+        
+        <div class="grid gap-4 flex-1 overflow-y-auto">
+            <template x-for="(room, id) in rooms" :key="id">
+                <div @click="joinRoom(id)" class="ui-panel p-6 flex justify-between items-center cursor-pointer hover:border-blue-500 transition">
+                    <span class="text-2xl font-black italic uppercase" x-text="room.name"></span>
+                    <span class="text-blue-500 font-mono font-bold" x-text="Object.keys(room.slots || {}).length + '/10'"></span>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <div x-show="view === 'lobby'" x-cloak class="h-screen flex flex-col">
+        <nav class="p-6 bg-[#11111b] flex justify-between items-center border-b-2 border-black">
+            <button @click="leaveRoom()" class="text-slate-500 font-bold uppercase">← LEAVE</button>
+            <h2 class="text-2xl font-black text-blue-400" x-text="activeRoomData?.name"></h2>
+            <div class="w-10"></div>
+        </nav>
+
+        <div x-show="!micPermission" class="absolute inset-0 bg-black/90 z-50 flex items-center justify-center text-center">
+            <div class="p-10">
+                <h3 class="text-3xl font-black mb-4">BROWSER SECURITY</h3>
+                <p class="text-slate-400 mb-8 max-w-xs">HTTPS requires you to manually activate your microphone to start the data stream.</p>
+                <button @click="initAudio()" class="bg-blue-600 px-10 py-5 rounded-2xl font-black text-xl shadow-[0_0_30px_rgba(37,99,235,0.5)]">
+                    ACTIVATE MICROPHONE
+                </button>
+            </div>
+        </div>
+
+        <div class="bg-black py-2 px-10 border-b border-white/5">
+            <div class="mic-meter" :style="'width: ' + localVol + '%'"></div>
+        </div>
+
+        <div class="flex-1 p-10 grid grid-cols-2 md:grid-cols-5 gap-8">
+            <template x-for="n in 10" :key="n">
+                <div class="ui-panel aspect-square flex flex-col items-center justify-center relative overflow-hidden" 
+                     :class="activeRoomData?.slots?.[n]?.speaking ? 'speaking-border' : ''">
+                    
+                    <template x-if="activeRoomData?.slots?.[n]">
+                        <div class="text-center">
+                            <img :src="activeRoomData.slots[n].pfp" class="w-24 h-24 rounded-full border-2 border-slate-800 mb-4 bg-slate-900">
+                            <p class="font-black text-white italic truncate w-32" x-text="activeRoomData.slots[n].name"></p>
+                        </div>
+                    </template>
+                    <template x-if="!activeRoomData?.slots?.[n]">
+                        <span class="opacity-10 text-slate-500 font-black">VACANT</span>
+                    </template>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <script>
+        const config = {
+            databaseURL: "https://youvshomer-90eb3-default-rtdb.firebaseio.com",
+        };
+        firebase.initializeApp(config);
+        const db = firebase.database();
+
+        function newMeets() {
+            return {
+                view: 'login',
+                micPermission: false,
+                localVol: 0,
+                user: { id: Date.now(), name: '', pfp: 'https://api.dicebear.com/7.x/avataaars/svg?seed=' + Math.random() },
+                rooms: {},
+                activeRoomId: null,
+                activeRoomData: null,
+                mySlot: null,
+
+                boot() {
+                    db.ref('rooms').on('value', s => this.rooms = s.val() || {});
+                    if(localStorage.getItem('NM_USER')) {
+                        this.user = JSON.parse(localStorage.getItem('NM_USER'));
+                        this.view = 'menu';
+                    }
+                },
+                saveProfile() {
+                    if(!this.user.name.trim()) return;
+                    localStorage.setItem('NM_USER', JSON.stringify(this.user));
+                    this.view = 'menu';
+                },
+                async initAudio() {
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        const source = audioContext.createMediaStreamSource(stream);
+                        const analyser = audioContext.createAnalyser();
+                        analyser.fftSize = 256;
+                        source.connect(analyser);
+                        this.micPermission = true;
+
+                        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                        const update = () => {
+                            if(!this.activeRoomId || !this.mySlot) return;
+                            analyser.getByteFrequencyData(dataArray);
+                            let sum = dataArray.reduce((a, b) => a + b);
+                            let avg = sum / dataArray.length;
+                            this.localVol = Math.min(100, avg * 3);
+                            
+                            // Detect speaking (threshold 15)
+                            db.ref(`rooms/${this.activeRoomId}/slots/${this.mySlot}/speaking`).set(avg > 15);
+                            requestAnimationFrame(update);
+                        };
+                        update();
+                    } catch (e) { alert("Microphone blocked. Check your browser settings!"); }
+                },
+                createRoom() {
+                    const n = prompt("SERVER NAME:");
+                    if(!n) return;
+                    const ref = db.ref('rooms').push();
+                    ref.set({ name: n.toUpperCase(), slots: { 1: { ...this.user, speaking: false } } });
+                    this.joinRoom(ref.key);
+                },
+                joinRoom(id) {
+                    this.activeRoomId = id;
+                    db.ref('rooms/' + id).on('value', s => {
+                        this.activeRoomData = s.val();
+                        if(!this.activeRoomData) return this.view = 'menu';
+                        
+                        let slot = Object.keys(this.activeRoomData.slots || {}).find(k => this.activeRoomData.slots[k].id === this.user.id);
+                        if(slot) this.mySlot = slot;
+                        else {
+                            for(let i=1; i<=10; i++) {
+                                if(!this.activeRoomData.slots?.[i]) {
+                                    db.ref(`rooms/${id}/slots/${i}`).set({ ...this.user, speaking: false });
+                                    db.ref(`rooms/${id}/slots/${i}`).onDisconnect().remove();
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                    this.view = 'lobby';
+                },
+                leaveRoom() {
+                    if(this.mySlot) db.ref(`rooms/${this.activeRoomId}/slots/${this.mySlot}`).remove();
+                    location.reload();
+                }
+            }
+        }
+    </script>
+</body>
+</html>
